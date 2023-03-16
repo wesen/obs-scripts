@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"fyne.io/fyne/v2"
@@ -12,17 +13,11 @@ import (
 	"github.com/andreykaipov/goobs"
 )
 
-func RunCountdownTimer(ctx context.Context, w fyne.Window, client *goobs.Client) error {
-	timer := time.NewTimer(5 * time.Second)
-	defer timer.Stop()
-
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-timer.C:
-		dialog.ShowInformation("Timer", "Timer ran out", w)
-		return nil
-	}
+type UI struct {
+	window      fyne.Window
+	statusLabel *widget.Label
+	timerLabel  *widget.Label
+	client      *goobs.Client
 }
 
 func main() {
@@ -36,41 +31,93 @@ func main() {
 		return
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	_ = cancel
+	ui := &UI{
+		window:      w,
+		statusLabel: widget.NewLabel(""),
+		timerLabel:  widget.NewLabel(""),
+		client:      client,
+	}
 
-	statusLabel := widget.NewLabel("")
-
-	startButton := widget.NewButton("Start Recording", func() {
-		err := startRecording(client)
-		if err != nil {
-			statusLabel.SetText("Error starting recording: " + err.Error())
-		} else {
-			statusLabel.SetText("Recording started.")
-			go func() {
-				err := RunCountdownTimer(ctx, w, client)
-				if err != nil {
-					statusLabel.SetText("Error running countdown timer: " + err.Error())
-				}
-			}()
-		}
-	})
-
-	stopButton := widget.NewButton("Stop Recording", func() {
-		err := stopRecording(client)
-		if err != nil {
-			statusLabel.SetText("Error stopping recording: " + err.Error())
-		} else {
-			statusLabel.SetText("Recording stopped.")
-		}
-	})
+	startButton := widget.NewButton("Start Recording", ui.startRecording)
+	stopButton := widget.NewButton("Stop Recording", ui.stopRecording)
 
 	buttons := container.NewHBox(startButton, stopButton)
-	content := container.NewVBox(buttons, statusLabel)
+	content := container.NewVBox(buttons, ui.statusLabel, ui.timerLabel)
 
 	w.SetContent(content)
 	w.Resize(fyne.NewSize(300, 200))
 	w.ShowAndRun()
+}
+
+func (ui *UI) startRecording() {
+	err := startRecording(ui.client)
+	if err != nil {
+		ui.statusLabel.SetText("Error starting recording: " + err.Error())
+	} else {
+		ui.statusLabel.SetText("Recording started.")
+		go ui.runCountdownTimer(context.Background())
+	}
+}
+
+func (ui *UI) stopRecording() {
+	err := stopRecording(ui.client)
+	if err != nil {
+		ui.statusLabel.SetText("Error stopping recording: " + err.Error())
+	} else {
+		ui.statusLabel.SetText("Recording stopped.")
+	}
+}
+
+func (ui *UI) runCountdownTimer(ctx context.Context) error {
+	timerDuration := 5 * time.Second
+	timer := time.NewTicker(1 * time.Second)
+	defer timer.Stop()
+
+	startTime := time.Now()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case currentTime := <-timer.C:
+			elapsed := currentTime.Sub(startTime)
+			remaining := timerDuration - elapsed
+			if remaining <= 0 {
+				ui.timerLabel.SetText("")
+				ui.showTimerExpiredDialog(ctx)
+				return nil
+			} else {
+				ui.timerLabel.SetText(fmt.Sprintf("Time remaining: %v", remaining.Round(time.Second)))
+			}
+		}
+	}
+}
+
+func (ui *UI) showTimerExpiredDialog(ctx context.Context) {
+	var popUp dialog.Dialog
+	continueButton := widget.NewButton("Continue", func() {
+		ui.window.Canvas().SetOnTypedKey(nil)
+		popUp.Hide()
+		ui.runCountdownTimer(ctx)
+	})
+
+	stopButton := widget.NewButton("Stop", func() {
+		ui.window.Canvas().SetOnTypedKey(nil)
+		popUp.Hide()
+		ui.stopRecording()
+	})
+
+	buttons := container.NewHBox(continueButton, stopButton)
+	content := container.NewVBox(widget.NewLabel("Timer ran out"), buttons)
+
+	popUp = dialog.NewCustom("Timer Expired", "Close", content, ui.window)
+	// show popup
+	ui.window.Canvas().SetOnTypedKey(func(event *fyne.KeyEvent) {
+		if event.Name == fyne.KeyEscape {
+			popUp.Hide()
+		}
+	})
+	popUp.Show()
 }
 
 func startRecording(client *goobs.Client) error {
